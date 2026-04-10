@@ -82,10 +82,14 @@ fn cmd_init() -> Result<()> {
     // Store token in Keychain
     config::store_token(&token)?;
 
-    // Save config with hardcoded chat_id
-    let cfg = config::Config {
-        chat_id: "8620850843".to_string(),
-    };
+    // Prompt for chat ID
+    eprint!("Chat ID: ");
+    let mut chat_id = String::new();
+    std::io::stdin().read_line(&mut chat_id)?;
+    let chat_id = chat_id.trim().to_string();
+    anyhow::ensure!(!chat_id.is_empty(), "Chat ID cannot be empty");
+
+    let cfg = config::Config { chat_id };
     config::save_config(&cfg)?;
 
     display::print_init_success(&user);
