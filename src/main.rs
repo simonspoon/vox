@@ -719,3 +719,58 @@ fn parse_duration(s: &str) -> Result<Duration> {
 
     Ok(Duration::from_secs(secs))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_duration_seconds() {
+        assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn parse_duration_minutes() {
+        assert_eq!(parse_duration("15m").unwrap(), Duration::from_secs(15 * 60));
+    }
+
+    #[test]
+    fn parse_duration_hours() {
+        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(2 * 3600));
+    }
+
+    #[test]
+    fn parse_duration_trims_whitespace() {
+        assert_eq!(parse_duration("  1h  ").unwrap(), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn parse_duration_rejects_empty() {
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("   ").is_err());
+    }
+
+    #[test]
+    fn parse_duration_rejects_unknown_unit() {
+        assert!(parse_duration("5d").is_err());
+        assert!(parse_duration("5x").is_err());
+    }
+
+    #[test]
+    fn parse_duration_rejects_bad_number() {
+        assert!(parse_duration("abcm").is_err());
+    }
+
+    #[test]
+    fn apply_identity_none_is_passthrough() {
+        assert_eq!(apply_identity("hello", None), "hello");
+    }
+
+    #[test]
+    fn apply_identity_some_prefixes_name() {
+        assert_eq!(
+            apply_identity("hello", Some("deploy-bot")),
+            "**[deploy-bot]** hello"
+        );
+    }
+}

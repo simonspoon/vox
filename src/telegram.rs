@@ -435,3 +435,121 @@ impl TelegramClient {
         resp.result.context("Telegram returned ok but no result")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_getme_response() {
+        let json = r#"{
+            "ok": true,
+            "result": {
+                "id": 42,
+                "is_bot": true,
+                "first_name": "Vox Bot",
+                "username": "voxbot"
+            }
+        }"#;
+        let resp: TelegramResponse<User> = serde_json::from_str(json).unwrap();
+        assert!(resp.ok);
+        let user = resp.result.unwrap();
+        assert_eq!(user.id, 42);
+        assert!(user.is_bot);
+        assert_eq!(user.username.as_deref(), Some("voxbot"));
+    }
+
+    #[test]
+    fn deserialize_error_response() {
+        let json = r#"{
+            "ok": false,
+            "description": "Unauthorized"
+        }"#;
+        let resp: TelegramResponse<User> = serde_json::from_str(json).unwrap();
+        assert!(!resp.ok);
+        assert_eq!(resp.description.as_deref(), Some("Unauthorized"));
+        assert!(resp.result.is_none());
+    }
+
+    #[test]
+    fn deserialize_message_with_reply() {
+        let json = r#"{
+            "ok": true,
+            "result": {
+                "message_id": 2,
+                "from": {"id": 1, "first_name": "Alice"},
+                "chat": {"id": -1001, "type": "private"},
+                "text": "yes",
+                "reply_to_message": {
+                    "message_id": 1,
+                    "chat": {"id": -1001, "type": "private"},
+                    "text": "deploy?"
+                }
+            }
+        }"#;
+        let resp: TelegramResponse<Message> = serde_json::from_str(json).unwrap();
+        let msg = resp.result.unwrap();
+        assert_eq!(msg.message_id, 2);
+        assert_eq!(msg.text.as_deref(), Some("yes"));
+        let parent = msg.reply_to_message.unwrap();
+        assert_eq!(parent.message_id, 1);
+        assert_eq!(parent.text.as_deref(), Some("deploy?"));
+    }
+
+    #[test]
+    fn deserialize_update_with_callback_query() {
+        let json = r#"{
+            "update_id": 100,
+            "callback_query": {
+                "id": "cb123",
+                "from": {"id": 7, "first_name": "Bob"},
+                "message": {
+                    "message_id": 5,
+                    "chat": {"id": -1001, "type": "private"}
+                },
+                "data": "yes"
+            }
+        }"#;
+        let update: Update = serde_json::from_str(json).unwrap();
+        assert_eq!(update.update_id, 100);
+        assert!(update.message.is_none());
+        let cb = update.callback_query.unwrap();
+        assert_eq!(cb.id, "cb123");
+        assert_eq!(cb.data.as_deref(), Some("yes"));
+        assert_eq!(cb.message.unwrap().message_id, 5);
+    }
+
+    #[test]
+    fn deserialize_message_with_document() {
+        let json = r#"{
+            "message_id": 9,
+            "chat": {"id": -1001, "type": "private"},
+            "document": {
+                "file_id": "abc",
+                "file_name": "report.pdf",
+                "mime_type": "application/pdf",
+                "file_size": 1024
+            }
+        }"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        let doc = msg.document.unwrap();
+        assert_eq!(doc.file_id, "abc");
+        assert_eq!(doc.file_name.as_deref(), Some("report.pdf"));
+    }
+
+    #[test]
+    fn deserialize_message_with_photo_sizes() {
+        let json = r#"{
+            "message_id": 10,
+            "chat": {"id": -1001, "type": "private"},
+            "photo": [
+                {"file_id": "small", "width": 90, "height": 60},
+                {"file_id": "large", "width": 1280, "height": 720, "file_size": 50000}
+            ]
+        }"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        let photos = msg.photo.unwrap();
+        assert_eq!(photos.len(), 2);
+        assert_eq!(photos.last().unwrap().file_id, "large");
+    }
+}
