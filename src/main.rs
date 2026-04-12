@@ -5,6 +5,7 @@ mod telegram;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use std::io::{self, BufRead};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
@@ -13,6 +14,14 @@ struct Cli {
     /// Output results as JSON
     #[arg(long, global = true)]
     json: bool,
+
+    /// Send messages without notification sound
+    #[arg(long, global = true)]
+    silent: bool,
+
+    /// Prefix messages with agent identity
+    #[arg(long = "as", global = true)]
+    as_name: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -31,12 +40,97 @@ enum Commands {
         /// Timeout duration (e.g., "30m", "1h", "2h")
         #[arg(long, default_value = "1h")]
         timeout: String,
+
+        /// Default value to return if timeout expires
+        #[arg(long)]
+        on_timeout: Option<String>,
+
+        /// Reply to a specific message ID for threading
+        #[arg(long)]
+        reply_to: Option<i64>,
     },
 
     /// Send a fire-and-forget notification
     Notify {
         /// The message to send
         message: String,
+
+        /// Reply to a specific message ID for threading
+        #[arg(long)]
+        reply_to: Option<i64>,
+    },
+
+    /// Send a yes/no question with inline keyboard buttons and wait for a response
+    Confirm {
+        /// The yes/no question to send
+        message: String,
+
+        /// Timeout duration (e.g., "30m", "1h")
+        #[arg(long, default_value = "1h")]
+        timeout: String,
+
+        /// Default value to return if timeout expires (must be "yes" or "no")
+        #[arg(long)]
+        on_timeout: Option<String>,
+
+        /// Reply to a specific message ID for threading
+        #[arg(long)]
+        reply_to: Option<i64>,
+    },
+
+    /// Send a multiple-choice question and wait for selection
+    Pick {
+        /// The question to send
+        message: String,
+
+        /// Comma-separated options
+        #[arg(short, long)]
+        options: String,
+
+        /// Timeout duration (e.g., "30m", "1h", "2h")
+        #[arg(long, default_value = "1h")]
+        timeout: String,
+
+        /// Default value to return if timeout expires (must match one of the options)
+        #[arg(long)]
+        on_timeout: Option<String>,
+
+        /// Reply to a specific message ID for threading
+        #[arg(long)]
+        reply_to: Option<i64>,
+    },
+
+    /// Send a file to the chat
+    Send {
+        /// Path to the file to send
+        path: PathBuf,
+
+        /// Optional caption for the file
+        #[arg(long)]
+        caption: Option<String>,
+
+        /// Reply to a specific message ID for threading
+        #[arg(long)]
+        reply_to: Option<i64>,
+    },
+
+    /// Edit an existing message in-place
+    Progress {
+        /// Message ID to edit
+        message_id: i64,
+        /// New message text
+        text: String,
+    },
+
+    /// Wait for any message from the user
+    Wait {
+        /// Timeout duration (e.g., "30m", "1h", "2h")
+        #[arg(long, default_value = "1h")]
+        timeout: String,
+
+        /// Default value to return if timeout expires
+        #[arg(long)]
+        on_timeout: Option<String>,
     },
 
     /// Check bot connectivity and config
@@ -46,10 +140,76 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    let as_name = cli.as_name.as_deref();
+
     match cli.command {
         Commands::Init => cmd_init()?,
-        Commands::Ask { message, timeout } => cmd_ask(&message, &timeout, cli.json)?,
-        Commands::Notify { message } => cmd_notify(&message, cli.json)?,
+        Commands::Ask {
+            message,
+            timeout,
+            on_timeout,
+            reply_to,
+        } => cmd_ask(
+            &message,
+            &timeout,
+            on_timeout.as_deref(),
+            cli.json,
+            cli.silent,
+            as_name,
+            reply_to,
+        )?,
+        Commands::Confirm {
+            message,
+            timeout,
+            on_timeout,
+            reply_to,
+        } => cmd_confirm(
+            &message,
+            &timeout,
+            on_timeout.as_deref(),
+            cli.json,
+            cli.silent,
+            as_name,
+            reply_to,
+        )?,
+        Commands::Pick {
+            message,
+            options,
+            timeout,
+            on_timeout,
+            reply_to,
+        } => cmd_pick(
+            &message,
+            &options,
+            &timeout,
+            on_timeout.as_deref(),
+            cli.json,
+            cli.silent,
+            as_name,
+            reply_to,
+        )?,
+        Commands::Progress { message_id, text } => {
+            cmd_progress(message_id, &text, cli.json, as_name)?
+        }
+        Commands::Notify { message, reply_to } => {
+            cmd_notify(&message, cli.json, cli.silent, as_name, reply_to)?
+        }
+        Commands::Send {
+            path,
+            caption,
+            reply_to,
+        } => cmd_send(
+            &path,
+            caption.as_deref(),
+            cli.json,
+            cli.silent,
+            as_name,
+            reply_to,
+        )?,
+        Commands::Wait {
+            timeout,
+            on_timeout,
+        } => cmd_wait(&timeout, on_timeout.as_deref(), cli.json)?,
         Commands::Status => cmd_status(cli.json)?,
     }
 
@@ -96,7 +256,15 @@ fn cmd_init() -> Result<()> {
     Ok(())
 }
 
-fn cmd_ask(message: &str, timeout_str: &str, json_output: bool) -> Result<()> {
+fn cmd_ask(
+    message: &str,
+    timeout_str: &str,
+    on_timeout: Option<&str>,
+    json_output: bool,
+    silent: bool,
+    as_name: Option<&str>,
+    reply_to: Option<i64>,
+) -> Result<()> {
     let cfg = config::load_config()?;
     let token = config::load_token()?;
     let client = telegram::TelegramClient::new(token);
@@ -104,7 +272,8 @@ fn cmd_ask(message: &str, timeout_str: &str, json_output: bool) -> Result<()> {
     let timeout = parse_duration(timeout_str)?;
 
     // Send the question
-    let sent = client.send_message(&cfg.chat_id, message)?;
+    let display_msg = apply_identity(message, as_name);
+    let sent = client.send_message(&cfg.chat_id, &display_msg, silent, reply_to)?;
     let sent_id = sent.message_id;
 
     if !json_output {
@@ -117,6 +286,11 @@ fn cmd_ask(message: &str, timeout_str: &str, json_output: bool) -> Result<()> {
 
     loop {
         if start.elapsed() >= timeout {
+            if let Some(default) = on_timeout {
+                eprintln!("Timed out, using default: {default}");
+                display::print_reply_default(default, json_output);
+                return Ok(());
+            }
             bail!("Timed out waiting for reply after {timeout_str}");
         }
 
@@ -131,21 +305,336 @@ fn cmd_ask(message: &str, timeout_str: &str, json_output: bool) -> Result<()> {
                 && let Some(ref reply_to) = msg.reply_to_message
                 && reply_to.message_id == sent_id
             {
-                display::print_reply(msg, json_output);
+                let file = download_message_file(&client, msg)?;
+                if let Some(off) = offset {
+                    client.commit_offset(off);
+                }
+                display::print_reply(msg, file.as_deref(), json_output, false);
                 return Ok(());
             }
         }
     }
 }
 
-fn cmd_notify(message: &str, json_output: bool) -> Result<()> {
+fn cmd_confirm(
+    message: &str,
+    timeout_str: &str,
+    on_timeout: Option<&str>,
+    json_output: bool,
+    silent: bool,
+    as_name: Option<&str>,
+    reply_to: Option<i64>,
+) -> Result<()> {
+    // Validate on_timeout value before sending the message
+    if let Some(val) = on_timeout
+        && val != "yes"
+        && val != "no"
+    {
+        bail!("--on-timeout for confirm must be \"yes\" or \"no\", got: {val:?}");
+    }
+
     let cfg = config::load_config()?;
     let token = config::load_token()?;
     let client = telegram::TelegramClient::new(token);
 
-    let sent = client.send_message(&cfg.chat_id, message)?;
+    let timeout = parse_duration(timeout_str)?;
+
+    // Build inline keyboard with Yes/No buttons
+    let keyboard = telegram::InlineKeyboardMarkup {
+        inline_keyboard: vec![vec![
+            telegram::InlineKeyboardButton {
+                text: "Yes".to_string(),
+                callback_data: "yes".to_string(),
+            },
+            telegram::InlineKeyboardButton {
+                text: "No".to_string(),
+                callback_data: "no".to_string(),
+            },
+        ]],
+    };
+
+    // Send the question with keyboard
+    let display_msg = apply_identity(message, as_name);
+    let sent = client.send_message_with_keyboard(
+        &cfg.chat_id,
+        &display_msg,
+        keyboard,
+        silent,
+        reply_to,
+    )?;
+    let sent_id = sent.message_id;
+
+    if !json_output {
+        eprintln!("Waiting for confirmation (timeout: {timeout_str})...");
+    }
+
+    // Poll for callback query response
+    let start = Instant::now();
+    let mut offset: Option<i64> = None;
+
+    loop {
+        if start.elapsed() >= timeout {
+            if let Some(default) = on_timeout {
+                eprintln!("Timed out, using default: {default}");
+                display::print_confirm(default, sent_id, json_output, true);
+                return Ok(());
+            }
+            bail!("Timed out waiting for confirmation after {timeout_str}");
+        }
+
+        let updates = client.get_updates(offset, 30)?;
+
+        for update in &updates {
+            offset = Some(update.update_id + 1);
+
+            if let Some(ref cb) = update.callback_query
+                && let Some(ref cb_msg) = cb.message
+                && cb_msg.message_id == sent_id
+            {
+                // Acknowledge the callback to dismiss loading state
+                let _ = client.answer_callback_query(&cb.id);
+
+                if let Some(off) = offset {
+                    client.commit_offset(off);
+                }
+
+                let answer = cb.data.as_deref().unwrap_or("unknown");
+                display::print_confirm(answer, sent_id, json_output, false);
+                return Ok(());
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_pick(
+    message: &str,
+    options_str: &str,
+    timeout_str: &str,
+    on_timeout: Option<&str>,
+    json_output: bool,
+    silent: bool,
+    as_name: Option<&str>,
+    reply_to: Option<i64>,
+) -> Result<()> {
+    let options: Vec<String> = options_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if options.len() < 2 {
+        bail!("At least 2 options are required");
+    }
+
+    // Check for duplicates
+    let mut seen = std::collections::HashSet::new();
+    for opt in &options {
+        if !seen.insert(opt.as_str()) {
+            bail!("Duplicate option: {opt}");
+        }
+    }
+
+    // Validate on_timeout value matches one of the options
+    if let Some(val) = on_timeout
+        && !options.iter().any(|opt| opt == val)
+    {
+        bail!(
+            "--on-timeout value {val:?} must match one of the options: {}",
+            options.join(", ")
+        );
+    }
+
+    let cfg = config::load_config()?;
+    let token = config::load_token()?;
+    let client = telegram::TelegramClient::new(token);
+
+    let timeout = parse_duration(timeout_str)?;
+
+    // Build keyboard: one button per row for readability
+    let keyboard = telegram::InlineKeyboardMarkup {
+        inline_keyboard: options
+            .iter()
+            .map(|opt| {
+                vec![telegram::InlineKeyboardButton {
+                    text: opt.clone(),
+                    callback_data: opt.clone(),
+                }]
+            })
+            .collect(),
+    };
+
+    let display_msg = apply_identity(message, as_name);
+    let sent = client.send_message_with_keyboard(
+        &cfg.chat_id,
+        &display_msg,
+        keyboard,
+        silent,
+        reply_to,
+    )?;
+    let sent_id = sent.message_id;
+
+    if !json_output {
+        eprintln!("Waiting for selection (timeout: {timeout_str})...");
+    }
+
+    let start = Instant::now();
+    let mut offset: Option<i64> = None;
+
+    loop {
+        if start.elapsed() >= timeout {
+            if let Some(default) = on_timeout {
+                eprintln!("Timed out, using default: {default}");
+                display::print_pick(default, sent_id, json_output, true);
+                return Ok(());
+            }
+            bail!("Timed out waiting for selection after {timeout_str}");
+        }
+
+        let updates = client.get_updates(offset, 30)?;
+
+        for update in &updates {
+            offset = Some(update.update_id + 1);
+
+            if let Some(ref cb) = update.callback_query
+                && let Some(ref cb_msg) = cb.message
+                && cb_msg.message_id == sent_id
+            {
+                let _ = client.answer_callback_query(&cb.id);
+
+                if let Some(off) = offset {
+                    client.commit_offset(off);
+                }
+
+                let choice = cb.data.as_deref().unwrap_or("unknown");
+                display::print_pick(choice, sent_id, json_output, false);
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn cmd_notify(
+    message: &str,
+    json_output: bool,
+    silent: bool,
+    as_name: Option<&str>,
+    reply_to: Option<i64>,
+) -> Result<()> {
+    let cfg = config::load_config()?;
+    let token = config::load_token()?;
+    let client = telegram::TelegramClient::new(token);
+
+    let display_msg = apply_identity(message, as_name);
+    let sent = client.send_message(&cfg.chat_id, &display_msg, silent, reply_to)?;
     display::print_sent(&sent, json_output);
     Ok(())
+}
+
+fn cmd_progress(
+    message_id: i64,
+    text: &str,
+    json_output: bool,
+    as_name: Option<&str>,
+) -> Result<()> {
+    let cfg = config::load_config()?;
+    let token = config::load_token()?;
+    let client = telegram::TelegramClient::new(token);
+
+    let display_msg = apply_identity(text, as_name);
+    let edited = client.edit_message_text(&cfg.chat_id, message_id, &display_msg)?;
+    display::print_progress(&edited, json_output);
+    Ok(())
+}
+
+fn cmd_send(
+    path: &std::path::Path,
+    caption: Option<&str>,
+    json_output: bool,
+    silent: bool,
+    as_name: Option<&str>,
+    reply_to: Option<i64>,
+) -> Result<()> {
+    anyhow::ensure!(path.exists(), "File not found: {}", path.display());
+
+    let cfg = config::load_config()?;
+    let token = config::load_token()?;
+    let client = telegram::TelegramClient::new(token);
+
+    let display_caption = caption.map(|c| apply_identity(c, as_name));
+    let sent = client.send_document(
+        &cfg.chat_id,
+        path,
+        display_caption.as_deref(),
+        silent,
+        reply_to,
+    )?;
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string());
+    display::print_file_sent(&sent, &filename, json_output);
+    Ok(())
+}
+
+fn cmd_wait(timeout_str: &str, on_timeout: Option<&str>, json_output: bool) -> Result<()> {
+    let cfg = config::load_config()?;
+    let token = config::load_token()?;
+    let client = telegram::TelegramClient::new(token);
+
+    let timeout = parse_duration(timeout_str)?;
+
+    // Get bot's own user ID so we can filter out our own messages
+    let bot_user = client.get_me()?;
+    let bot_id = bot_user.id;
+
+    if !json_output {
+        eprintln!("Waiting for message (timeout: {timeout_str})...");
+    }
+
+    let start = Instant::now();
+    let mut offset: Option<i64> = None;
+
+    loop {
+        if start.elapsed() >= timeout {
+            if let Some(default) = on_timeout {
+                eprintln!("Timed out, using default: {default}");
+                display::print_wait_default(default, json_output);
+                return Ok(());
+            }
+            bail!("Timed out waiting for message after {timeout_str}");
+        }
+
+        let updates = client.get_updates(offset, 30)?;
+
+        for update in &updates {
+            offset = Some(update.update_id + 1);
+
+            if let Some(ref msg) = update.message
+                && msg.chat.id.to_string() == cfg.chat_id
+                && msg.from.as_ref().is_some_and(|u| u.id != bot_id)
+            {
+                let text = msg.text.as_deref().unwrap_or("");
+                let from_name = msg
+                    .from
+                    .as_ref()
+                    .map(|u| u.first_name.as_str())
+                    .unwrap_or("unknown");
+                let file = download_message_file(&client, msg)?;
+                if let Some(off) = offset {
+                    client.commit_offset(off);
+                }
+                display::print_wait_result(
+                    text,
+                    file.as_deref(),
+                    msg.message_id,
+                    from_name,
+                    json_output,
+                );
+                return Ok(());
+            }
+        }
+    }
 }
 
 fn cmd_status(json_output: bool) -> Result<()> {
@@ -156,6 +645,57 @@ fn cmd_status(json_output: bool) -> Result<()> {
     let user = client.get_me()?;
     display::print_status(&user, json_output);
     Ok(())
+}
+
+/// If the given message has a document or photo, download it to the vox temp
+/// directory and return the local path. Otherwise returns Ok(None).
+fn download_message_file(
+    client: &telegram::TelegramClient,
+    msg: &telegram::Message,
+) -> Result<Option<PathBuf>> {
+    // Get file_id from document or largest photo
+    let file_id = if let Some(ref doc) = msg.document {
+        Some((doc.file_id.clone(), doc.file_name.clone()))
+    } else if let Some(ref photos) = msg.photo {
+        // Pick largest photo (last in array -- Telegram sorts ascending)
+        photos.last().map(|p| (p.file_id.clone(), None))
+    } else {
+        None
+    };
+
+    let Some((file_id, file_name)) = file_id else {
+        return Ok(None);
+    };
+
+    let file_info = client.get_file(&file_id)?;
+    let file_path = file_info
+        .file_path
+        .context("Telegram returned no file_path")?;
+
+    // Create <tempdir>/vox/
+    let tmp_dir = std::env::temp_dir().join("vox");
+    std::fs::create_dir_all(&tmp_dir)
+        .with_context(|| format!("Failed to create temp dir at {}", tmp_dir.display()))?;
+
+    // Determine filename: use document's filename, or extract from file_path
+    let dest_name = file_name.unwrap_or_else(|| {
+        std::path::Path::new(&file_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("{file_id}.bin"))
+    });
+    let dest = tmp_dir.join(&dest_name);
+
+    client.download_file(&file_path, &dest)?;
+    Ok(Some(dest))
+}
+
+/// Prefix a message with the agent identity, if provided.
+fn apply_identity(message: &str, as_name: Option<&str>) -> String {
+    match as_name {
+        Some(name) => format!("**[{name}]** {message}"),
+        None => message.to_string(),
+    }
 }
 
 /// Parse a human-readable duration string like "30m", "1h", "2h".
