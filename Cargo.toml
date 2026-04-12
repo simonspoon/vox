@@ -3,6 +3,11 @@ name = "vox"
 version = "0.1.0"
 edition = "2024"
 description = "Telegram async messaging CLI for Claude Code agents"
+license = "MIT"
+repository = "https://github.com/simonspoon/vox"
+readme = "README.md"
+keywords = ["telegram", "cli", "claude", "bot", "messaging"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1"
