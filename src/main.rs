@@ -19,9 +19,13 @@ struct Cli {
     #[arg(long, global = true)]
     silent: bool,
 
-    /// Prefix messages with agent identity
+    /// Render agent identity in the message title slot
     #[arg(long = "as", global = true)]
     as_name: Option<String>,
+
+    /// Render a distinct title above the message body
+    #[arg(long, global = true)]
+    title: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -141,6 +145,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let as_name = cli.as_name.as_deref();
+    let title = cli.title.as_deref();
 
     match cli.command {
         Commands::Init => cmd_init()?,
@@ -156,6 +161,7 @@ fn main() -> Result<()> {
             cli.json,
             cli.silent,
             as_name,
+            title,
             reply_to,
         )?,
         Commands::Confirm {
@@ -170,6 +176,7 @@ fn main() -> Result<()> {
             cli.json,
             cli.silent,
             as_name,
+            title,
             reply_to,
         )?,
         Commands::Pick {
@@ -186,13 +193,14 @@ fn main() -> Result<()> {
             cli.json,
             cli.silent,
             as_name,
+            title,
             reply_to,
         )?,
         Commands::Progress { message_id, text } => {
             cmd_progress(message_id, &text, cli.json, as_name)?
         }
         Commands::Notify { message, reply_to } => {
-            cmd_notify(&message, cli.json, cli.silent, as_name, reply_to)?
+            cmd_notify(&message, cli.json, cli.silent, as_name, title, reply_to)?
         }
         Commands::Send {
             path,
@@ -204,6 +212,7 @@ fn main() -> Result<()> {
             cli.json,
             cli.silent,
             as_name,
+            title,
             reply_to,
         )?,
         Commands::Wait {
@@ -256,6 +265,7 @@ fn cmd_init() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_ask(
     message: &str,
     timeout_str: &str,
@@ -263,6 +273,7 @@ fn cmd_ask(
     json_output: bool,
     silent: bool,
     as_name: Option<&str>,
+    title: Option<&str>,
     reply_to: Option<i64>,
 ) -> Result<()> {
     let cfg = config::load_config()?;
@@ -272,7 +283,7 @@ fn cmd_ask(
     let timeout = parse_duration(timeout_str)?;
 
     // Send the question
-    let display_msg = apply_identity(message, as_name);
+    let display_msg = apply_identity(message, as_name, title);
     let sent = client.send_message(&cfg.chat_id, &display_msg, silent, reply_to)?;
     let sent_id = sent.message_id;
 
@@ -316,6 +327,7 @@ fn cmd_ask(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_confirm(
     message: &str,
     timeout_str: &str,
@@ -323,6 +335,7 @@ fn cmd_confirm(
     json_output: bool,
     silent: bool,
     as_name: Option<&str>,
+    title: Option<&str>,
     reply_to: Option<i64>,
 ) -> Result<()> {
     // Validate on_timeout value before sending the message
@@ -354,7 +367,7 @@ fn cmd_confirm(
     };
 
     // Send the question with keyboard
-    let display_msg = apply_identity(message, as_name);
+    let display_msg = apply_identity(message, as_name, title);
     let sent = client.send_message_with_keyboard(
         &cfg.chat_id,
         &display_msg,
@@ -415,6 +428,7 @@ fn cmd_pick(
     json_output: bool,
     silent: bool,
     as_name: Option<&str>,
+    title: Option<&str>,
     reply_to: Option<i64>,
 ) -> Result<()> {
     let options: Vec<String> = options_str
@@ -464,7 +478,7 @@ fn cmd_pick(
             .collect(),
     };
 
-    let display_msg = apply_identity(message, as_name);
+    let display_msg = apply_identity(message, as_name, title);
     let sent = client.send_message_with_keyboard(
         &cfg.chat_id,
         &display_msg,
@@ -519,13 +533,14 @@ fn cmd_notify(
     json_output: bool,
     silent: bool,
     as_name: Option<&str>,
+    title: Option<&str>,
     reply_to: Option<i64>,
 ) -> Result<()> {
     let cfg = config::load_config()?;
     let token = config::load_token()?;
     let client = telegram::TelegramClient::new(token);
 
-    let display_msg = apply_identity(message, as_name);
+    let display_msg = apply_identity(message, as_name, title);
     let sent = client.send_message(&cfg.chat_id, &display_msg, silent, reply_to)?;
     display::print_sent(&sent, json_output);
     Ok(())
@@ -541,18 +556,20 @@ fn cmd_progress(
     let token = config::load_token()?;
     let client = telegram::TelegramClient::new(token);
 
-    let display_msg = apply_identity(text, as_name);
+    let display_msg = apply_identity(text, as_name, None);
     let edited = client.edit_message_text(&cfg.chat_id, message_id, &display_msg)?;
     display::print_progress(&edited, json_output);
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_send(
     path: &std::path::Path,
     caption: Option<&str>,
     json_output: bool,
     silent: bool,
     as_name: Option<&str>,
+    title: Option<&str>,
     reply_to: Option<i64>,
 ) -> Result<()> {
     anyhow::ensure!(path.exists(), "File not found: {}", path.display());
@@ -561,7 +578,7 @@ fn cmd_send(
     let token = config::load_token()?;
     let client = telegram::TelegramClient::new(token);
 
-    let display_caption = caption.map(|c| apply_identity(c, as_name));
+    let display_caption = caption.map(|c| apply_identity(c, as_name, title));
     let sent = client.send_document(
         &cfg.chat_id,
         path,
@@ -690,12 +707,24 @@ fn download_message_file(
     Ok(Some(dest))
 }
 
-/// Prefix a message with the agent identity, if provided.
-fn apply_identity(message: &str, as_name: Option<&str>) -> String {
-    match as_name {
-        Some(name) => format!("**[{name}]** {message}"),
-        None => message.to_string(),
-    }
+/// Build a display message by rendering the optional title slot above the body.
+///
+/// The title slot content is derived from (as_name, title):
+/// - (None, None) -> body only, unchanged
+/// - (Some(name), None) -> title is `name`
+/// - (None, Some(t)) -> title is `t`
+/// - (Some(name), Some(t)) -> title is `[name] t`
+///
+/// When present the title renders as a bold heading on its own line above the body,
+/// using Telegram legacy Markdown (`*bold*`).
+fn apply_identity(message: &str, as_name: Option<&str>, title: Option<&str>) -> String {
+    let heading = match (as_name, title) {
+        (None, None) => return message.to_string(),
+        (Some(name), None) => name.to_string(),
+        (None, Some(t)) => t.to_string(),
+        (Some(name), Some(t)) => format!("[{name}] {t}"),
+    };
+    format!("*{heading}*\n{message}")
 }
 
 /// Parse a human-readable duration string like "30m", "1h", "2h".
@@ -762,15 +791,32 @@ mod tests {
     }
 
     #[test]
-    fn apply_identity_none_is_passthrough() {
-        assert_eq!(apply_identity("hello", None), "hello");
+    fn apply_identity_neither_is_passthrough() {
+        assert_eq!(apply_identity("hello", None, None), "hello");
     }
 
     #[test]
-    fn apply_identity_some_prefixes_name() {
+    fn apply_identity_as_alone_renders_name_as_title() {
+        // --as alone now surfaces in the title slot. No body-prefix.
         assert_eq!(
-            apply_identity("hello", Some("deploy-bot")),
-            "**[deploy-bot]** hello"
+            apply_identity("hello", Some("deploy-bot"), None),
+            "*deploy-bot*\nhello"
+        );
+    }
+
+    #[test]
+    fn apply_identity_title_alone_renders_title() {
+        assert_eq!(
+            apply_identity("hello", None, Some("Deployed")),
+            "*Deployed*\nhello"
+        );
+    }
+
+    #[test]
+    fn apply_identity_as_and_title_combine_with_bracket() {
+        assert_eq!(
+            apply_identity("hello", Some("deploy-bot"), Some("Deployed")),
+            "*[deploy-bot] Deployed*\nhello"
         );
     }
 }
