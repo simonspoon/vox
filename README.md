@@ -72,7 +72,10 @@ answer=$(vox ask "Should I deploy to prod?")
 |---|---|
 | `--json` | Emit JSON instead of plain text |
 | `--silent` | Send without notification sound |
-| `--as <name>` | Prefix the message with `**[name]**` so the user knows which agent is asking |
+| `--as <name>` | Render the agent identity as a bold heading above the message body |
+| `--title <text>` | Render a distinct title above the message body |
+
+`--as` and `--title` both drive the same heading slot. If both are provided, the heading becomes `[name] title`. The heading renders as Telegram legacy Markdown (`*bold*`) on its own line above the body. Applies to `ask`, `confirm`, `pick`, `notify`, and `send` (as caption). `progress` respects `--as` but ignores `--title`.
 
 ### Blocking commands — timeouts
 
