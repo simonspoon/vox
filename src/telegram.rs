@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::Path;
 
 /// Telegram Bot API client.
+#[derive(Clone)]
 pub struct TelegramClient {
     token: String,
     client: reqwest::blocking::Client,
@@ -91,7 +92,8 @@ pub struct Update {
 struct SendMessageRequest<'a> {
     chat_id: &'a str,
     text: &'a str,
-    parse_mode: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parse_mode: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     disable_notification: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -126,7 +128,8 @@ struct EditMessageTextRequest<'a> {
     chat_id: &'a str,
     message_id: i64,
     text: &'a str,
-    parse_mode: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parse_mode: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,7 +150,9 @@ impl TelegramClient {
         format!("https://api.telegram.org/bot{}/{method}", self.token)
     }
 
-    /// Send a message to a chat. Returns the sent Message.
+    /// Send a message to a chat using legacy MarkdownV1 parse mode. Returns
+    /// the sent Message. Used for `vox notify` and other legacy-formatted
+    /// messages where Markdown rendering is intentional.
     pub fn send_message(
         &self,
         chat_id: &str,
@@ -155,10 +160,37 @@ impl TelegramClient {
         silent: bool,
         reply_to: Option<i64>,
     ) -> Result<Message> {
+        self.send_inner(chat_id, text, silent, reply_to, Some("Markdown"))
+    }
+
+    /// Send a message as plain text — no `parse_mode`, so unbalanced `_`, `*`,
+    /// backticks, or `[`/`]` characters never trigger Telegram's "can't parse
+    /// entities" 400. Used for aspect-chat replies, the `<slug> thinking…`
+    /// interstitial, and any system-command reply that contains `[<slug>]`
+    /// brackets (which MarkdownV1 treats as link openers). C1 (code review
+    /// 019e0eb7-06b9, 2026-05-09).
+    pub fn send_text(
+        &self,
+        chat_id: &str,
+        text: &str,
+        silent: bool,
+        reply_to: Option<i64>,
+    ) -> Result<Message> {
+        self.send_inner(chat_id, text, silent, reply_to, None)
+    }
+
+    fn send_inner(
+        &self,
+        chat_id: &str,
+        text: &str,
+        silent: bool,
+        reply_to: Option<i64>,
+        parse_mode: Option<&str>,
+    ) -> Result<Message> {
         let body = SendMessageRequest {
             chat_id,
             text,
-            parse_mode: "Markdown",
+            parse_mode,
             disable_notification: if silent { Some(true) } else { None },
             reply_to_message_id: reply_to,
         };
@@ -281,13 +313,31 @@ impl TelegramClient {
         Ok(())
     }
 
-    /// Edit a message's text in-place. Returns the edited Message.
+    /// Edit a message's text in-place using legacy MarkdownV1. Returns the
+    /// edited Message.
     pub fn edit_message_text(&self, chat_id: &str, message_id: i64, text: &str) -> Result<Message> {
+        self.edit_inner(chat_id, message_id, text, Some("Markdown"))
+    }
+
+    /// Edit a message's text as plain text — no `parse_mode`. C1 fix: aspect
+    /// reply chunks and `<slug> thinking…` interstitials must never trigger
+    /// MarkdownV1 parse errors on unbalanced `_`, `*`, backticks, or `[`/`]`.
+    pub fn edit_text(&self, chat_id: &str, message_id: i64, text: &str) -> Result<Message> {
+        self.edit_inner(chat_id, message_id, text, None)
+    }
+
+    fn edit_inner(
+        &self,
+        chat_id: &str,
+        message_id: i64,
+        text: &str,
+        parse_mode: Option<&str>,
+    ) -> Result<Message> {
         let body = EditMessageTextRequest {
             chat_id,
             message_id,
             text,
-            parse_mode: "Markdown",
+            parse_mode,
         };
 
         let resp: TelegramResponse<Message> = self
@@ -439,6 +489,52 @@ impl TelegramClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C1: send_text must serialise its body WITHOUT a `parse_mode` field, so
+    // Anthropic-generated content with unbalanced `_`/`*`/backticks/`[`/`]`
+    // never trips MarkdownV1 entity parsing. Compare to send_message which
+    // intentionally retains MarkdownV1.
+    #[test]
+    fn send_text_omits_parse_mode() {
+        let plain = SendMessageRequest {
+            chat_id: "1",
+            text: "[lotus] do_thing(*ptr) — `code`",
+            parse_mode: None,
+            disable_notification: None,
+            reply_to_message_id: None,
+        };
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(
+            json.get("parse_mode").is_none(),
+            "send_text JSON must not include parse_mode"
+        );
+        assert_eq!(json["text"], "[lotus] do_thing(*ptr) — `code`");
+    }
+
+    #[test]
+    fn send_message_keeps_parse_mode_markdown() {
+        let md = SendMessageRequest {
+            chat_id: "1",
+            text: "ok",
+            parse_mode: Some("Markdown"),
+            disable_notification: None,
+            reply_to_message_id: None,
+        };
+        let json = serde_json::to_value(&md).unwrap();
+        assert_eq!(json["parse_mode"], "Markdown");
+    }
+
+    #[test]
+    fn edit_text_omits_parse_mode() {
+        let plain = EditMessageTextRequest {
+            chat_id: "1",
+            message_id: 42,
+            text: "[banshee] _underscore_at_split",
+            parse_mode: None,
+        };
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("parse_mode").is_none());
+    }
 
     #[test]
     fn deserialize_getme_response() {

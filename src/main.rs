@@ -1,5 +1,9 @@
+mod aspect;
 mod config;
+mod dispatch;
 mod display;
+mod listen;
+mod session;
 mod telegram;
 
 use anyhow::{Context, Result, bail};
@@ -137,6 +141,13 @@ enum Commands {
         on_timeout: Option<String>,
     },
 
+    /// Poll for incoming Telegram updates and log them to stderr
+    Listen {
+        /// Run in the foreground (no daemonization; for launchd compatibility)
+        #[arg(long)]
+        foreground: bool,
+    },
+
     /// Check bot connectivity and config
     Status,
 }
@@ -219,6 +230,7 @@ fn main() -> Result<()> {
             timeout,
             on_timeout,
         } => cmd_wait(&timeout, on_timeout.as_deref(), cli.json)?,
+        Commands::Listen { foreground } => listen::cmd_listen(foreground)?,
         Commands::Status => cmd_status(cli.json)?,
     }
 
@@ -258,7 +270,18 @@ fn cmd_init() -> Result<()> {
     let chat_id = chat_id.trim().to_string();
     anyhow::ensure!(!chat_id.is_empty(), "Chat ID cannot be empty");
 
-    let cfg = config::Config { chat_id };
+    // S01: Anthropic API key (Keychain only — never written to config.toml)
+    eprint!("Anthropic API key: ");
+    let mut anth_key = String::new();
+    std::io::stdin().read_line(&mut anth_key)?;
+    let anth_key = anth_key.trim().to_string();
+    anyhow::ensure!(!anth_key.is_empty(), "Anthropic API key cannot be empty");
+    config::store_anthropic_key(&anth_key)?;
+
+    let cfg = config::Config {
+        chat_id,
+        user_id_allowlist: Vec::new(),
+    };
     config::save_config(&cfg)?;
 
     display::print_init_success(&user);
