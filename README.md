@@ -37,8 +37,13 @@ cargo install --path .
 vox init
 # Enter your Telegram bot token: <paste>
 # Chat ID: <paste>
+# Anthropic API key: <paste>
 # Initialized vox with bot @yourbot (Your Bot)
 ```
+
+The Anthropic API key is only used by `vox listen` aspect-chat (see below); the
+other commands work without it, but `init` currently asks for all three values
+up front.
 
 Verify:
 
@@ -58,6 +63,7 @@ vox status
 | `send <path>` | Upload a file | sent message id |
 | `progress <id> <text>` | Edit an existing message in place | edited message id |
 | `wait` | Block for the next user message | message text (or file path) |
+| `listen` | Long-running daemon: route inbound messages to legacy task dispatch and/or aspect-chat | logs to stderr |
 | `status` | Check bot connectivity | bot info |
 
 All reply-returning commands write the raw answer to stdout with no trailing newline, so they compose with shell substitution:
@@ -138,6 +144,49 @@ next=$(vox wait --timeout 30m)
 
 If the user's reply to `ask` (or the next message picked up by `wait`) is a photo or document, vox downloads it to `$TMPDIR/vox/<filename>` and prints the local path to stdout instead of text. Callers can branch on whether the output is a path that exists.
 
+## Listen mode (aspect chat + task dispatch)
+
+`vox listen` is a long-running daemon that polls Telegram and routes each inbound message in one of two ways:
+
+- **Legacy task dispatch.** Messages from a sender *not* in `user_id_allowlist` are handed to the existing launchagent task pipeline (back-compat for agent/cron senders). Empty allowlist preserves pre-v0.3 behaviour — every sender hits this path.
+- **Aspect chat.** Messages from an allowlisted sender are forwarded to a per-(chat, aspect) conversation with the Anthropic API. The system prompt is reloaded fresh from `simaris show <slug> --content` on each turn, so aspect edits propagate immediately. Reply chunks are sent back as plain text prefixed with `[<slug>]`.
+
+```sh
+vox listen --foreground   # for launchd / systemd; otherwise daemonizes
+```
+
+### Addressing an aspect
+
+| Form | Meaning |
+|---|---|
+| `<slug>: <body>` | Talk to `<slug>` (any slug shape, including hyphens) |
+| `/<slug> <body>` | Talk to `<slug>` (no-hyphen slugs only; `_` is aliased to `-`, e.g. `/vox_aspect_chat` → `vox-aspect-chat`) |
+| `<body>` (no prefix) | Routes to the *sticky* aspect for this chat (default `lotus`) |
+
+The slug must exist in `simaris` — unknown slugs fall through to the sticky aspect with the text left intact, so prose like `note:` or `https://...` is not misparsed. Slug length is capped at 32 bytes.
+
+### Aspect commands
+
+| Command | Effect |
+|---|---|
+| `/aspect` | Show the current sticky aspect for this chat |
+| `/aspect help` | Print the addressing grammar and migration notes |
+| `/reset` | Clear conversation history with the current sticky aspect |
+| `/new <slug>` | Switch sticky aspect and clear prior history |
+
+History persists across restarts in `~/.config/vox/sessions.json`; entries idle more than 30 minutes are pruned.
+
+### Allowlist
+
+`user_id_allowlist` in `~/.config/vox/config.toml` is a list of numeric Telegram user IDs allowed to use aspect chat. Edit the file by hand:
+
+```toml
+chat_id = "123456789"
+user_id_allowlist = [123456789]
+```
+
+**Breaking change for human-operated agent scripts:** before v0.3, an agent script sending a task message from an *allowlisted* account went to the launchagent path. It now goes to aspect-chat (sticky `lotus`) instead. To keep the legacy behaviour either prefix tasks with `lotus: <task>` (still reaches lotus, but via the direct Anthropic chat path) or send from a non-allowlisted account.
+
 ## Claude Code integration
 
 Drop a shell wrapper into an agent's toolkit so it can pause for human input:
@@ -161,11 +210,14 @@ Because `vox ask`/`confirm`/`pick`/`wait` block the process, a background agent 
 
 | What | Where |
 |---|---|
-| Chat ID | `~/.config/vox/config.toml` |
+| Chat ID | `~/.config/vox/config.toml` (`chat_id`) |
+| Aspect-chat allowlist | `~/.config/vox/config.toml` (`user_id_allowlist`) |
 | Bot token | macOS Keychain, account `vox`, service `vox-telegram-token` |
+| Anthropic API key | macOS Keychain, account `vox`, service `vox-anthropic-key` |
+| Aspect-chat history | `~/.config/vox/sessions.json` (flock + atomic write) |
 | Downloaded files | `$TMPDIR/vox/` |
 
-Re-run `vox init` to change either value.
+Re-run `vox init` to re-prompt for the chat ID, bot token, and Anthropic key. Secrets are fed to `security` via stdin, never via `-w <secret>` on argv.
 
 ## Building
 
