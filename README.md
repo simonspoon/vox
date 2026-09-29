@@ -96,6 +96,14 @@ Without `--on-timeout`, a timeout is a non-zero exit.
 
 `ask`, `confirm`, `pick`, `notify`, and `send` accept `--reply-to <message-id>` to thread replies under an earlier message, so multi-step flows stay visually grouped in Telegram.
 
+### URL buttons
+
+`ask`, `confirm`, and `notify` accept a repeatable `--button "Label=URL"` that adds a link button below the message, one button per row. The label is everything before the first `=`; the URL must start with `http://`, `https://`, or `tg://`. On `confirm`, the link buttons appear under Yes/No.
+
+```bash
+vox notify "Build failed" --button "Logs=https://ci.example.com/run/42?tab=logs" --button "Repo=https://github.com/me/repo"
+```
+
 ## Examples
 
 Ask a free-form question with a one-hour timeout, defaulting to "skip":

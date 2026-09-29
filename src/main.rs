@@ -56,6 +56,10 @@ enum Commands {
         /// Reply to a specific message ID for threading
         #[arg(long)]
         reply_to: Option<i64>,
+
+        /// Add a URL button as "Label=URL" (repeatable, one button per row)
+        #[arg(long = "button", value_parser = telegram::parse_button)]
+        buttons: Vec<telegram::InlineKeyboardButton>,
     },
 
     /// Send a fire-and-forget notification
@@ -66,6 +70,10 @@ enum Commands {
         /// Reply to a specific message ID for threading
         #[arg(long)]
         reply_to: Option<i64>,
+
+        /// Add a URL button as "Label=URL" (repeatable, one button per row)
+        #[arg(long = "button", value_parser = telegram::parse_button)]
+        buttons: Vec<telegram::InlineKeyboardButton>,
     },
 
     /// Send a yes/no question with inline keyboard buttons and wait for a response
@@ -84,6 +92,10 @@ enum Commands {
         /// Reply to a specific message ID for threading
         #[arg(long)]
         reply_to: Option<i64>,
+
+        /// Add a URL button as "Label=URL" (repeatable, one button per row)
+        #[arg(long = "button", value_parser = telegram::parse_button)]
+        buttons: Vec<telegram::InlineKeyboardButton>,
     },
 
     /// Send a multiple-choice question and wait for selection
@@ -165,6 +177,7 @@ fn main() -> Result<()> {
             timeout,
             on_timeout,
             reply_to,
+            buttons,
         } => cmd_ask(
             &message,
             &timeout,
@@ -174,12 +187,14 @@ fn main() -> Result<()> {
             as_name,
             title,
             reply_to,
+            buttons,
         )?,
         Commands::Confirm {
             message,
             timeout,
             on_timeout,
             reply_to,
+            buttons,
         } => cmd_confirm(
             &message,
             &timeout,
@@ -189,6 +204,7 @@ fn main() -> Result<()> {
             as_name,
             title,
             reply_to,
+            buttons,
         )?,
         Commands::Pick {
             message,
@@ -210,9 +226,13 @@ fn main() -> Result<()> {
         Commands::Progress { message_id, text } => {
             cmd_progress(message_id, &text, cli.json, as_name)?
         }
-        Commands::Notify { message, reply_to } => {
-            cmd_notify(&message, cli.json, cli.silent, as_name, title, reply_to)?
-        }
+        Commands::Notify {
+            message,
+            reply_to,
+            buttons,
+        } => cmd_notify(
+            &message, cli.json, cli.silent, as_name, title, reply_to, buttons,
+        )?,
         Commands::Send {
             path,
             caption,
@@ -298,6 +318,7 @@ fn cmd_ask(
     as_name: Option<&str>,
     title: Option<&str>,
     reply_to: Option<i64>,
+    buttons: Vec<telegram::InlineKeyboardButton>,
 ) -> Result<()> {
     let cfg = config::load_config()?;
     let token = config::load_token()?;
@@ -307,7 +328,14 @@ fn cmd_ask(
 
     // Send the question
     let display_msg = apply_identity(message, as_name, title);
-    let sent = client.send_message(&cfg.chat_id, &display_msg, silent, reply_to)?;
+    let sent = send_with_buttons(
+        &client,
+        &cfg.chat_id,
+        &display_msg,
+        silent,
+        reply_to,
+        buttons,
+    )?;
     let sent_id = sent.message_id;
 
     if !json_output {
@@ -360,6 +388,7 @@ fn cmd_confirm(
     as_name: Option<&str>,
     title: Option<&str>,
     reply_to: Option<i64>,
+    buttons: Vec<telegram::InlineKeyboardButton>,
 ) -> Result<()> {
     // Validate on_timeout value before sending the message
     if let Some(val) = on_timeout
@@ -376,18 +405,24 @@ fn cmd_confirm(
     let timeout = parse_duration(timeout_str)?;
 
     // Build inline keyboard with Yes/No buttons
-    let keyboard = telegram::InlineKeyboardMarkup {
+    let mut keyboard = telegram::InlineKeyboardMarkup {
         inline_keyboard: vec![vec![
             telegram::InlineKeyboardButton {
                 text: "Yes".to_string(),
-                callback_data: "yes".to_string(),
+                callback_data: Some("yes".to_string()),
+                url: None,
             },
             telegram::InlineKeyboardButton {
                 text: "No".to_string(),
-                callback_data: "no".to_string(),
+                callback_data: Some("no".to_string()),
+                url: None,
             },
         ]],
     };
+    // URL buttons go in extra rows below Yes/No
+    keyboard
+        .inline_keyboard
+        .extend(buttons.into_iter().map(|b| vec![b]));
 
     // Send the question with keyboard
     let display_msg = apply_identity(message, as_name, title);
@@ -495,7 +530,8 @@ fn cmd_pick(
             .map(|opt| {
                 vec![telegram::InlineKeyboardButton {
                     text: opt.clone(),
-                    callback_data: opt.clone(),
+                    callback_data: Some(opt.clone()),
+                    url: None,
                 }]
             })
             .collect(),
@@ -551,6 +587,24 @@ fn cmd_pick(
     }
 }
 
+/// Send a plain message, or one with URL buttons (one per row) when given.
+fn send_with_buttons(
+    client: &telegram::TelegramClient,
+    chat_id: &str,
+    text: &str,
+    silent: bool,
+    reply_to: Option<i64>,
+    buttons: Vec<telegram::InlineKeyboardButton>,
+) -> Result<telegram::Message> {
+    if buttons.is_empty() {
+        return client.send_message(chat_id, text, silent, reply_to);
+    }
+    let keyboard = telegram::InlineKeyboardMarkup {
+        inline_keyboard: buttons.into_iter().map(|b| vec![b]).collect(),
+    };
+    client.send_message_with_keyboard(chat_id, text, keyboard, silent, reply_to)
+}
+
 fn cmd_notify(
     message: &str,
     json_output: bool,
@@ -558,13 +612,21 @@ fn cmd_notify(
     as_name: Option<&str>,
     title: Option<&str>,
     reply_to: Option<i64>,
+    buttons: Vec<telegram::InlineKeyboardButton>,
 ) -> Result<()> {
     let cfg = config::load_config()?;
     let token = config::load_token()?;
     let client = telegram::TelegramClient::new(token);
 
     let display_msg = apply_identity(message, as_name, title);
-    let sent = client.send_message(&cfg.chat_id, &display_msg, silent, reply_to)?;
+    let sent = send_with_buttons(
+        &client,
+        &cfg.chat_id,
+        &display_msg,
+        silent,
+        reply_to,
+        buttons,
+    )?;
     display::print_sent(&sent, json_output);
     Ok(())
 }

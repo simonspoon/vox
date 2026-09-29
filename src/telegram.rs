@@ -100,10 +100,40 @@ struct SendMessageRequest<'a> {
     reply_to_message_id: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+/// One inline keyboard button: either a callback button (`callback_data`) or
+/// a URL button (`url`).
+#[derive(Debug, Clone, Serialize)]
 pub struct InlineKeyboardButton {
     pub text: String,
-    pub callback_data: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Parse a `--button "Label=URL"` spec into a URL button. Splits on the first
+/// `=` (URLs may contain `=`). Telegram only accepts http, https and tg URLs.
+pub fn parse_button(spec: &str) -> Result<InlineKeyboardButton, String> {
+    let (label, url) = spec
+        .split_once('=')
+        .ok_or_else(|| format!("expected \"Label=URL\", got: {spec:?}"))?;
+    let (label, url) = (label.trim(), url.trim());
+    if label.is_empty() {
+        return Err(format!("button label is empty in: {spec:?}"));
+    }
+    if !["http://", "https://", "tg://"]
+        .iter()
+        .any(|p| url.starts_with(p))
+    {
+        return Err(format!(
+            "button URL must start with http://, https://, or tg://, got: {url:?}"
+        ));
+    }
+    Ok(InlineKeyboardButton {
+        text: label.to_string(),
+        callback_data: None,
+        url: Some(url.to_string()),
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -489,6 +519,42 @@ impl TelegramClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_button_splits_on_first_equals() {
+        let b = parse_button("Docs=https://x.io/a?b=c").unwrap();
+        assert_eq!(b.text, "Docs");
+        assert_eq!(b.url.as_deref(), Some("https://x.io/a?b=c"));
+        assert!(b.callback_data.is_none());
+        assert!(parse_button("Chat=tg://resolve?domain=foo").is_ok());
+        assert!(parse_button("A=http://x").is_ok());
+    }
+
+    #[test]
+    fn parse_button_rejects_invalid_specs() {
+        assert!(parse_button("no-equals").is_err());
+        assert!(parse_button("=https://x.io").is_err());
+        assert!(parse_button("  =https://x.io").is_err());
+        assert!(parse_button("A=ftp://x.io").is_err());
+        assert!(parse_button("A=").is_err());
+    }
+
+    #[test]
+    fn url_buttons_serialise_one_per_row() {
+        let markup = InlineKeyboardMarkup {
+            inline_keyboard: vec![
+                vec![parse_button("A=https://a.io").unwrap()],
+                vec![parse_button("B=https://b.io").unwrap()],
+            ],
+        };
+        assert_eq!(
+            serde_json::to_value(&markup).unwrap(),
+            serde_json::json!({"inline_keyboard": [
+                [{"text": "A", "url": "https://a.io"}],
+                [{"text": "B", "url": "https://b.io"}],
+            ]})
+        );
+    }
 
     // C1: send_text must serialise its body WITHOUT a `parse_mode` field, so
     // Anthropic-generated content with unbalanced `_`/`*`/backticks/`[`/`]`
